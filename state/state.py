@@ -1,7 +1,10 @@
 '''
-modulo que basicamente é a memoria do sistema, tudo que ele "lembra" é por causa desse arquivo
+modulo que basicamente é a memoria do sistema,
+tudo que ele "lembra" é por causa desse arquivo
 '''
 from pathlib import Path
+from typing import Optional
+
 
 class State:
     def __init__(self, data_dir: Path):
@@ -11,13 +14,19 @@ class State:
         self.failed_path = data_dir / "failed.txt"
         self.queue_path = data_dir / "queue.txt"
 
+        # memória global (compatibilidade)
         self.visited_pages = self._load(self.visited_pages_path)
         self.visited_files = self._load(self.visited_files_path)
         self.hashes = self._load(self.hashes_path)
         self.failed = self._load(self.failed_path)
         self.queue = self._load(self.queue_path)
 
-    def _load(self, path: Path) -> set:
+        self.visited_pages_by_entity: dict[str, set[str]] = {}
+
+    # =========================================================
+    # helpers internos
+    # =========================================================
+    def _load(self, path: Path) -> set[str]:
         if not path.exists():
             return set()
         return set(path.read_text(encoding="utf-8").splitlines())
@@ -26,10 +35,18 @@ class State:
         with open(path, "a", encoding="utf-8") as f:
             f.write(value + "\n")
 
-    def save_visited_page(self, url: str):
+    # =========================================================
+    # API pública
+    # =========================================================
+    def save_visited_page(self, url: str, entidade: Optional[str] = None):
+        # memória global (como antes)
         if url not in self.visited_pages:
             self.visited_pages.add(url)
             self._append(self.visited_pages_path, url)
+
+        # memória por entidade
+        if entidade:
+            self.visited_pages_by_entity.setdefault(entidade, set()).add(url)
 
     def save_visited_file(self, url: str):
         if url not in self.visited_files:
@@ -49,3 +66,12 @@ class State:
     def save_queue(self, queue: list[str]):
         self.queue = set(queue)
         self.queue_path.write_text("\n".join(queue), encoding="utf-8")
+
+    # =========================================================
+    # helpers novos (uso no browser fallback)
+    # =========================================================
+    def get_pages_for_entity(self, entidade: str) -> list[str]:
+        """
+        Retorna apenas as páginas visitadas pela entidade informada.
+        """
+        return list(self.visited_pages_by_entity.get(entidade, []))

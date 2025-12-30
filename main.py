@@ -8,9 +8,10 @@ from config import HEADERS
 from logger import setup_logger
 from state.state import State
 from discovery.crawler import crawl
+from discovery.evaluator import should_escalate
+from discovery.browser_fallback import crawl_browser
 from downloader.downloader import download
 from storage.index import append_index
-
 
 SEEDS = [
     {
@@ -27,8 +28,19 @@ SEEDS = [
             "/Biblioteca"
         ]
     },
+    {
+        "entidade": "ACEPREV",
+        "seed": "https://aceprev.com.br/planos",
+        "allowed_paths": [
+            "/planos"
+        ]
+    },
+    {
+        "entidade": "AEROS",
+        "seed": "https://www.aeros.com.br",
+        "allowed_paths": []  # escopo livre
+    },
 ]
-
 
 def main():
     logger = setup_logger(Path("data/logs"))
@@ -38,12 +50,17 @@ def main():
     session.headers.update(HEADERS)
 
     for cfg in SEEDS:
+        entidade = cfg.get("entidade", "DESCONHECIDA")
+
         logger.info("=" * 60)
-        logger.info(f"Iniciando entidade: {cfg['entidade']}")
+        logger.info(f"Iniciando entidade: {entidade}")
         logger.info(f"Seed: {cfg['seed']}")
         logger.info(f"Allowed paths: {cfg.get('allowed_paths', [])}")
 
-        crawl(
+        # ===============================
+        # 1. HTML FIRST
+        # ===============================
+        stats = crawl(
             session=session,
             seed_cfg=cfg,
             state=state,
@@ -52,8 +69,33 @@ def main():
             logger=logger
         )
 
-    logger.info("Scraper finalizado para todas as entidades.")
+        # ===============================
+        # 2. DECISÃO DE ESCALONAMENTO
+        # ===============================
+        if should_escalate(stats):
+            pages = state.get_pages_for_entity(entidade)
 
+            logger.warning(
+                f"[{entidade}] Nenhum PDF encontrado via HTML "
+                f"(pages={stats['visited_pages']}, js={stats['js_signals']}). "
+                f"Escalando para browser fallback com {len(pages)} páginas."
+            )
+
+            crawl_browser(
+                seed_cfg=cfg,
+                state=state,
+                pages=pages,
+                downloader=download,
+                storage=append_index,
+                logger=logger
+            )
+        else:
+            logger.info(
+                f"[{entidade}] HTML crawler suficiente "
+                f"(pdfs={stats['found_pdfs']})."
+            )
+
+    logger.info("Scraper finalizado para todas as entidades.")
 
 if __name__ == "__main__":
     main()
