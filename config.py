@@ -32,3 +32,18 @@ HEADERS = {"User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
            "Accept": "application/pdf, application/octet-stream, /", "Accept-Language": "pt-BR, pt;q=0.9", "Connection": "keep-alive",}
 
 REQUEST_DELAY = 0.5
+
+MAX_CRAWL_DEPTH = 5
+
+PATH_INTEREST_HINTS = [
+    "transparencia",
+    "demonstrativo",
+    "balancete",
+    "investimento",
+    "contabil",
+    "atuarial",
+    "relatorio",
+    "prestacao",
+    "financeiro",
+    "governanca",
+]

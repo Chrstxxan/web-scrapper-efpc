@@ -61,10 +61,19 @@ def download(
 
             except requests.HTTPError as e:
                 last_exc = e
-                if r.status_code in (429, 503):
+                status = e.response.status_code if e.response else None
+
+                # erros comuns em sites institucionais
+                if status in (404, 403):
+                    state.save_failed(url)
+                    return  # 🔹 não derruba o crawler
+
+                if status in (429, 503):
                     time.sleep(3 * (attempt + 1))
                     continue
-                raise
+
+                state.save_failed(url)
+                return
 
             except Exception as e:
                 last_exc = e
@@ -72,7 +81,7 @@ def download(
 
         else:
             state.save_failed(url)
-            raise last_exc
+            return
 
     # =========================================================
     # DEDUPE POR HASH

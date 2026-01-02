@@ -1,13 +1,26 @@
-'''
-modulo que faz a navegacao nos sites (tem filtragem aqui tambem)
-'''
+"""
+módulo que faz a navegação nos sites (HTML-first)
+"""
 import time
+import re
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
-from config import FILE_EXTENSIONS, REQUEST_DELAY, KEYWORDS, MIN_YEAR
+from config import (
+    FILE_EXTENSIONS,
+    REQUEST_DELAY,
+    KEYWORDS,
+    MIN_YEAR,
+    MAX_CRAWL_DEPTH,
+    PATH_INTEREST_HINTS,
+)
 from discovery.heuristics import is_relevant, extract_year
+from discovery.domain_guard import (
+    get_base_domain,
+    is_external_page,
+    is_blocked_domain,
+)
 
 
 def crawl(session, seed_cfg, state, downloader, storage, logger):
@@ -15,33 +28,41 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
     seed_url = seed_cfg["seed"]
     allowed_paths = seed_cfg.get("allowed_paths", [])
 
-    queue = [seed_url]
+    seed_base_domain = get_base_domain(seed_url)
 
-    # ===============================
-    # STATS PARA DECISÃO DE FALLBACK
-    # ===============================
+    # 🔹 fila agora carrega profundidade
+    queue = [(seed_url, 0)]
+
     stats = {
         "visited_pages": 0,
         "found_pdfs": 0,
         "js_signals": False,
+        "accordion_years": False,
     }
+
+    years_found = set()
 
     logger.info(f"[{entidade}] URLs iniciais na fila: 1")
 
     while queue:
-        url = queue.pop(0)
-        state.save_queue(queue)
+        url, depth = queue.pop(0)
+        state.save_queue([u for u, _ in queue])
 
         if url in state.visited_pages:
             continue
 
-        logger.info(f"[{entidade}] Visitando: {url}")
-        state.save_visited_page(url, entidade)
+        # 🔒 limite duro de profundidade
+        if depth > MAX_CRAWL_DEPTH:
+            continue
+
+        logger.info(f"[{entidade}] Visitando: {url} (depth={depth})")
+        state.save_visited_page(url)
         stats["visited_pages"] += 1
 
         try:
             r = session.get(url, timeout=20)
-            if "text/html" not in r.headers.get("Content-Type", ""):
+            ct = r.headers.get("Content-Type", "")
+            if "text/html" not in ct:
                 continue
         except Exception as e:
             logger.error(f"[{entidade}] Erro ao acessar {url} | {e}")
@@ -50,35 +71,49 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
 
         soup = BeautifulSoup(r.text, "lxml")
 
-        # 🔹 heurística simples: presença forte de JS
+        # sinal simples de JS
         if soup.find("script"):
             stats["js_signals"] = True
+
+        # detecção de accordion por ANO
+        for txt in soup.stripped_strings:
+            if re.fullmatch(r"20\d{2}", txt):
+                years_found.add(int(txt))
+
+        if len(years_found) >= 4:
+            stats["accordion_years"] = True
 
         # =========================================================
         # 1. LINKS <a href="">
         # =========================================================
         for a in soup.find_all("a", href=True):
-            href = urljoin(url, a["href"].strip())
+            raw_href = a["href"].strip()
+            href = urljoin(url, raw_href)
             text = a.get_text(strip=True)
 
             parsed = urlparse(href)
+            path_lower = parsed.path.lower()
 
-            # ignora fragmentos (#)
+            # ignora fragmentos
             if parsed.fragment:
                 continue
 
-            # escopo por entidade
-            if allowed_paths:
-                if not any(parsed.path.startswith(p) for p in allowed_paths):
+            # bloqueio de domínios lixo
+            if is_blocked_domain(href):
+                continue
+
+            is_document = href.lower().endswith(FILE_EXTENSIONS)
+
+            # HTML nunca sai do domínio
+            if not is_document:
+                if is_external_page(href, seed_base_domain):
                     continue
 
             # ---------------- DOCUMENTO ----------------
-            if href.lower().endswith(FILE_EXTENSIONS):
-
-                # 🟢 PDFs óbvios (WordPress, uploads, etc)
+            if is_document:
                 is_obvious_doc = (
-                    "/wp-content/uploads/" in href.lower()
-                    or "/uploads/" in href.lower()
+                    "/wp-content/uploads/" in path_lower
+                    or "/uploads/" in path_lower
                 )
 
                 if not is_obvious_doc:
@@ -86,7 +121,6 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                         continue
 
                 year = extract_year(f"{text} {href}")
-
                 if year is not None and year < MIN_YEAR:
                     logger.info(
                         f"[{entidade}] Ignorado por data ({year} < {MIN_YEAR}): {href}"
@@ -101,44 +135,63 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                     state=state,
                     storage=storage,
                     source_page=url,
-                    anchor_text=text,
+                    anchor_text=text or "link",
                     detected_year=year,
-                    entidade=entidade
+                    entidade=entidade,
                 )
 
             # ---------------- HTML ----------------
             else:
-                if href not in state.visited_pages and href not in queue:
-                    queue.append(href)
+                # 🎯 viés de interesse por path
+                is_interesting_path = any(h in path_lower for h in PATH_INTEREST_HINTS)
+
+                # ❗ paths irrelevantes só até certo depth
+                if not is_interesting_path and depth >= 2:
+                    continue
+
+                if allowed_paths:
+                    if not any(path_lower.startswith(p) for p in allowed_paths):
+                        continue
+
+                if href not in state.visited_pages and all(href != u for u, _ in queue):
+                    queue.append((href, depth + 1))
 
         # =========================================================
-        # 2. IFRAMES / FRAMES (sites antigos, AEROS etc)
+        # 2. IFRAMES / FRAMES
         # =========================================================
         for frame in soup.find_all(["iframe", "frame"], src=True):
             frame_url = urljoin(url, frame["src"].strip())
             parsed = urlparse(frame_url)
+            path_lower = parsed.path.lower()
 
             if parsed.fragment:
                 continue
 
-            if allowed_paths:
-                if not any(parsed.path.startswith(p) for p in allowed_paths):
-                    continue
-
-            if frame_url not in state.visited_pages and frame_url not in queue:
-                logger.debug(
-                    f"[{entidade}] iframe encontrado: {frame_url}"
-                )
-                queue.append(frame_url)
-
-        # =========================================================
-        # 3. PDFs escondidos em HTML / JS / data-attrs
-        # =========================================================
-        for node in soup.find_all(string=True):
-            if not node:
+            if is_blocked_domain(frame_url):
                 continue
 
-            raw = node.strip()
+            if is_external_page(frame_url, seed_base_domain):
+                continue
+
+            is_interesting_path = any(h in path_lower for h in PATH_INTEREST_HINTS)
+            if not is_interesting_path and depth >= 2:
+                continue
+
+            if allowed_paths:
+                if not any(path_lower.startswith(p) for p in allowed_paths):
+                    continue
+
+            if frame_url not in state.visited_pages and all(
+                frame_url != u for u, _ in queue
+            ):
+                logger.debug(f"[{entidade}] iframe encontrado: {frame_url}")
+                queue.append((frame_url, depth + 1))
+
+        # =========================================================
+        # 3. PDFs embutidos em texto / JS
+        # =========================================================
+        for node in soup.find_all(string=True):
+            raw = (node or "").strip()
             if ".pdf" not in raw.lower():
                 continue
 
@@ -153,32 +206,29 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                 if parsed.fragment:
                     continue
 
-                if allowed_paths:
-                    if not any(parsed.path.startswith(p) for p in allowed_paths):
-                        continue
+                if is_blocked_domain(pdf_url):
+                    continue
 
                 year = extract_year(pdf_url)
-
                 if year is not None and year < MIN_YEAR:
                     continue
 
-                if pdf_url not in state.visited_files:
-                    stats["found_pdfs"] += 1
+                if pdf_url in state.visited_files:
+                    continue
 
-                    logger.info(
-                        f"[{entidade}] PDF detectado via HTML bruto: {pdf_url}"
-                    )
+                stats["found_pdfs"] += 1
+                logger.info(f"[{entidade}] PDF detectado via HTML bruto: {pdf_url}")
 
-                    downloader(
-                        session=session,
-                        url=href,
-                        state=state,
-                        storage=storage,
-                        source_page=url,
-                        anchor_text=text,
-                        detected_year=year,
-                        entidade=entidade
-                    )
+                downloader(
+                    session=session,
+                    url=pdf_url,
+                    state=state,
+                    storage=storage,
+                    source_page=url,
+                    anchor_text="detected_in_html",
+                    detected_year=year,
+                    entidade=entidade,
+                )
 
         time.sleep(REQUEST_DELAY)
 
@@ -186,7 +236,8 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
         f"[{entidade}] Fila esgotada | "
         f"pages={stats['visited_pages']} "
         f"pdfs={stats['found_pdfs']} "
-        f"js={stats['js_signals']}"
+        f"js={stats['js_signals']} "
+        f"accordion={stats['accordion_years']}"
     )
 
     return stats
