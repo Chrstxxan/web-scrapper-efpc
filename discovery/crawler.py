@@ -30,7 +30,7 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
 
     seed_base_domain = get_base_domain(seed_url)
 
-    # 🔹 fila agora carrega profundidade
+    # fila com controle de profundidade
     queue = [(seed_url, 0)]
 
     stats = {
@@ -51,7 +51,6 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
         if url in state.visited_pages:
             continue
 
-        # 🔒 limite duro de profundidade
         if depth > MAX_CRAWL_DEPTH:
             continue
 
@@ -94,11 +93,9 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
             parsed = urlparse(href)
             path_lower = parsed.path.lower()
 
-            # ignora fragmentos
             if parsed.fragment:
                 continue
 
-            # bloqueio de domínios lixo
             if is_blocked_domain(href):
                 continue
 
@@ -121,6 +118,8 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                         continue
 
                 year = extract_year(f"{text} {href}")
+
+                # ⚠️ só ignora por data se ANO foi detectado
                 if year is not None and year < MIN_YEAR:
                     logger.info(
                         f"[{entidade}] Ignorado por data ({year} < {MIN_YEAR}): {href}"
@@ -142,11 +141,29 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
 
             # ---------------- HTML ----------------
             else:
-                # 🎯 viés de interesse por path
                 is_interesting_path = any(h in path_lower for h in PATH_INTEREST_HINTS)
 
-                # ❗ paths irrelevantes só até certo depth
-                if not is_interesting_path and depth >= 2:
+                # 🎯 heurística agora é SOFT (não bloqueante)
+                if (
+                    not is_interesting_path
+                    and depth >= MAX_CRAWL_DEPTH
+                    and not any(
+                        k in path_lower
+                        for k in (
+                            "relatorio",
+                            "documento",
+                            "balancete",
+                            "invest",
+                            "transpar",
+                            "pdf",
+                            "download",
+                            "arquivo",
+                        )
+                    )
+                ):
+                    logger.debug(
+                        f"[{entidade}] HTML ignorado | depth={depth} | path={path_lower}"
+                    )
                     continue
 
                 if allowed_paths:
@@ -174,7 +191,12 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                 continue
 
             is_interesting_path = any(h in path_lower for h in PATH_INTEREST_HINTS)
-            if not is_interesting_path and depth >= 2:
+
+            if (
+                not is_interesting_path
+                and depth >= MAX_CRAWL_DEPTH
+                and not any(k in path_lower for k in ("pdf", "documento", "arquivo"))
+            ):
                 continue
 
             if allowed_paths:

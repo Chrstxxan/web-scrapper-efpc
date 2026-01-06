@@ -17,3 +17,16 @@ def should_escalate(stats):
 
     # Caso conservador: não achou nada relevante
     return True
+
+def should_try_sitemap(stats: dict) -> bool:
+    """
+    Decide se vale a pena tentar sitemap
+    """
+    if stats["found_pdfs"] > 0:
+        return False
+
+    if stats["visited_pages"] >= 30:
+        return False
+
+    # pouco conteúdo + nada encontrado
+    return True
