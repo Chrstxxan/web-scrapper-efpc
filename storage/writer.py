@@ -10,7 +10,7 @@ def store(
     *,
     entidade: str,
     source_page: str,
-    kind: str,                 # "pdf" | "table"
+    kind: str,                 # "pdf" | "table" | "csv" | "png"
     content,
     meta: dict | None = None
 ):
@@ -42,7 +42,7 @@ def store(
         })
 
     # =====================================================
-    # TABELA (Petros, Banesprev, Previ etc)
+    # TABELA (JSON)
     # =====================================================
     elif kind == "table":
         out_dir = entidade_dir / "tables"
@@ -51,7 +51,6 @@ def store(
         fname = f"{ts}.json"
         path = out_dir / fname
 
-        # tabela = list[dict]
         import json
         with open(path, "w", encoding="utf-8") as f:
             json.dump(content, f, ensure_ascii=False, indent=2)
@@ -80,6 +79,27 @@ def store(
         append_index({
             "entidade": entidade,
             "kind": "csv",
+            "file": str(path),
+            "source_page": source_page,
+            "meta": meta
+        })
+
+    # =====================================================
+    # PNG (SCREENSHOT POWER BI)
+    # =====================================================
+    elif kind == "png":
+        out_dir = entidade_dir / "images"
+        out_dir.mkdir(exist_ok=True)
+
+        fname = meta.get("filename") or f"{ts}.png"
+        path = out_dir / fname
+
+        with open(path, "wb") as f:
+            f.write(content)
+
+        append_index({
+            "entidade": entidade,
+            "kind": "png",
             "file": str(path),
             "source_page": source_page,
             "meta": meta

@@ -23,6 +23,7 @@ MAX_PAGES = 10
 PAGE_TIMEOUT_MS = 20000
 HARD_PAGE_BUDGET_SEC = 25
 
+
 def infer_year(text: str | None):
     if not text:
         return None
@@ -70,10 +71,10 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     entidade=entidade,
                     source_page=page.url,
                     kind="pdf",
-                    content=None,  # ou content_override quando houver
+                    content=content,
                     meta={
-                        "url": pdf_url,
-                        "year": infer_year(href),
+                        "filename": filename,
+                        "year": infer_year(filename),
                         "origin": "dom_visible"
                     }
                 )
@@ -109,11 +110,11 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     entidade=entidade,
                     source_page=page.url,
                     kind="pdf",
-                    content=None,  # ou content_override quando houver
+                    content=body,
                     meta={
                         "url": pdf_url,
-                        "year": infer_year(href),
-                        "origin": "dom_visible"
+                        "year": infer_year(pdf_url),
+                        "origin": "xhr"
                     }
                 )
             except Exception:
@@ -146,11 +147,11 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                         entidade=entidade,
                         source_page=page.url,
                         kind="pdf",
-                        content=None,  # ou content_override quando houver
+                        content=r.content,
                         meta={
                             "url": pdf_url,
-                            "year": infer_year(href),
-                            "origin": "dom_visible"
+                            "year": infer_year(pdf_url),
+                            "origin": "popup"
                         }
                     )
 
@@ -224,13 +225,24 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
                 tables = run_strategies(page, logger)
 
-                # Caso a estratégia extraia dados tabulares (Petros, Banesprev, etc)
-                tables = run_strategies(page, logger)
-
                 for idx, item in enumerate(tables):
 
-                    # 🔥 NOVO: Power BI exporta CSV
-                    if isinstance(item, dict) and "csv_bytes" in item:
+                    # 🖼️ Power BI Screenshot (PNG)
+                    if isinstance(item, dict) and item.get("__kind__") == "png":
+                        store(
+                            entidade=entidade,
+                            source_page=page.url,
+                            kind="png",
+                            content=item["__bytes__"],
+                            meta={
+                                "filename": item.get("__filename__"),
+                                "strategy": "powerbi_screenshot",
+                                "index": idx
+                            }
+                        )
+
+                    # 🔥 Power BI exporta CSV
+                    elif isinstance(item, dict) and "csv_bytes" in item:
                         store(
                             entidade=entidade,
                             source_page=page.url,
@@ -314,14 +326,18 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 if pdf_url in state.visited_files:
                     continue
 
+                r = session.get(pdf_url, timeout=20)
+                if not r.ok or not r.content:
+                    continue
+
                 store(
                     entidade=entidade,
                     source_page=page.url,
                     kind="pdf",
-                    content=None,  # ou content_override quando houver
+                    content=r.content,
                     meta={
                         "url": pdf_url,
-                        "year": infer_year(href),
+                        "year": infer_year(pdf_url),
                         "origin": "dom_visible"
                     }
                 )

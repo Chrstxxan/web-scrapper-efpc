@@ -33,7 +33,6 @@ SEEDS = [
     },
 ]
 
-
 def main():
     logger = setup_logger(Path("data/logs"))
     state = State(Path("data"))
