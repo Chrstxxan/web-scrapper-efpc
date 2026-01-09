@@ -5,14 +5,15 @@ modulo que controla o fallback relacionado a utilizacao de browser no scrapping
 import os
 import re
 import time
-import threading
 import requests
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
+
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+
 from browser.strategy_router import run_strategies
 from storage.writer import store
 from discovery.patterns import detect_patterns
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 # =========================================================
 # CONFIG
@@ -24,6 +25,9 @@ PAGE_TIMEOUT_MS = 20000
 HARD_PAGE_BUDGET_SEC = 25
 
 
+# =========================================================
+# HELPERS
+# =========================================================
 def infer_year(text: str | None):
     if not text:
         return None
@@ -31,12 +35,19 @@ def infer_year(text: str | None):
     return int(m.group(1)) if m else None
 
 
+NON_HTML_EXTS = (".xml", ".pdf", ".zip", ".doc", ".docx", ".xls", ".xlsx")
+
+
+def is_html_page(url: str) -> bool:
+    return not url.lower().endswith(NON_HTML_EXTS)
+
+
+# =========================================================
+# MAIN
+# =========================================================
 def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
-    seed = seed_cfg["seed"]
     entidade = seed_cfg.get("entidade", "DESCONHECIDA")
-    seed_domain = urlparse(seed).hostname or ""
-
     session = requests.Session()
 
     with sync_playwright() as p:
@@ -50,12 +61,11 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
         logger.warning(f"[{entidade}] Chromium iniciado")
 
-        # 🔧 contexto correto (downloads + popups)
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
         # =========================================================
-        # 📥 DOWNLOAD EVENT (nativo)
+        # 📥 DOWNLOAD EVENT
         # =========================================================
         def handle_download(download):
             try:
@@ -63,9 +73,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 filename = download.suggested_filename
                 content = path.read_bytes()
 
-                logger.info(
-                    f"[{entidade}] Download capturado via browser: {filename}"
-                )
+                logger.info(f"[{entidade}] Download capturado via browser: {filename}")
 
                 store(
                     entidade=entidade,
@@ -75,13 +83,11 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     meta={
                         "filename": filename,
                         "year": infer_year(filename),
-                        "origin": "dom_visible"
-                    }
+                        "origin": "download_event",
+                    },
                 )
             except Exception as e:
-                logger.error(
-                    f"[{entidade}] Erro ao processar download via browser: {e}"
-                )
+                logger.error(f"[{entidade}] Erro ao processar download: {e}")
 
         page.on("download", handle_download)
 
@@ -102,9 +108,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 if not body or len(body) < 5000:
                     return
 
-                logger.info(
-                    f"[{entidade}] PDF capturado via XHR/fetch: {pdf_url}"
-                )
+                logger.info(f"[{entidade}] PDF capturado via XHR: {pdf_url}")
 
                 store(
                     entidade=entidade,
@@ -114,8 +118,8 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     meta={
                         "url": pdf_url,
                         "year": infer_year(pdf_url),
-                        "origin": "xhr"
-                    }
+                        "origin": "xhr",
+                    },
                 )
             except Exception:
                 pass
@@ -123,7 +127,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
         page.on("response", handle_response)
 
         # =========================================================
-        # 🪟 POPUP / NOVA ABA (window.open → PDF)
+        # 🪟 POPUP / NOVA ABA
         # =========================================================
         def handle_popup(popup):
             try:
@@ -137,9 +141,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     popup.close()
                     return
 
-                logger.info(
-                    f"[{entidade}] PDF capturado via nova aba: {pdf_url}"
-                )
+                logger.info(f"[{entidade}] PDF capturado via popup: {pdf_url}")
 
                 r = session.get(pdf_url, timeout=20)
                 if r.ok and r.content:
@@ -151,16 +153,13 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                         meta={
                             "url": pdf_url,
                             "year": infer_year(pdf_url),
-                            "origin": "popup"
-                        }
+                            "origin": "popup",
+                        },
                     )
 
                 popup.close()
-
-            except Exception as e:
-                logger.debug(
-                    f"[{entidade}] Erro ao processar popup PDF: {e}"
-                )
+            except Exception:
+                pass
 
         page.on("popup", handle_popup)
 
@@ -168,144 +167,121 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
         # 🚀 LOOP PRINCIPAL
         # =========================================================
         logger.warning(
-            f"[{entidade}] Usando browser fallback STRONG "
-            f"({len(pages)} páginas descobertas)"
+            f"[{entidade}] Usando browser fallback STRONG ({len(pages)} páginas)"
         )
 
         for i, url in enumerate(pages[:MAX_PAGES]):
-            if url in state.visited_pages:
+
+            if not is_html_page(url):
+                logger.info(f"[{entidade}] Ignorando URL não-HTML: {url}")
                 continue
 
-            logger.info(
-                f"[{entidade}] Browser visitando ({i+1}/{MAX_PAGES}): {url}"
-            )
+            logger.info(f"[{entidade}] Browser visitando ({i+1}/{MAX_PAGES}): {url}")
 
             start_time = time.time()
 
             try:
-                page.goto(
-                    url,
-                    wait_until="domcontentloaded",
-                    timeout=PAGE_TIMEOUT_MS
-                )
+                page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             except PlaywrightTimeout:
                 continue
 
-            # =====================================================
-            # ⏳ ESPERA REAL PARA POWER BI / IFRAMES DINÂMICOS
-            # =====================================================
             try:
-                page.wait_for_selector(
-                    "iframe, div[role='grid'], canvas",
-                    timeout=20000
-                )
-                logger.info(f"[{entidade}] Power BI / iframe detectado")
-            except PlaywrightTimeout:
-                logger.warning(f"[{entidade}] Nenhum Power BI detectado (seguindo)")
-
-            try:
-                page.wait_for_selector(
-                    "a, button, [role=button]",
-                    timeout=5000
-                )
+                page.wait_for_selector("body", timeout=5000)
             except PlaywrightTimeout:
                 pass
 
-            # ⛔ corte duro ANTES das estratégias
-            if time.time() - start_time > HARD_PAGE_BUDGET_SEC:
-                logger.warning(f"[{entidade}] Budget excedido antes das estratégias")
-                continue
-
             # =====================================================
-            # 🧠 DETECÇÃO DE PADRÕES + ESTRATÉGIAS AUTOMÁTICAS
+            # 🧠 PIPELINE DE EXTRAÇÃO (COM ROTEAMENTO MULTIPREV)
             # =====================================================
             try:
                 patterns = detect_patterns(page)
                 logger.warning(f"[{entidade}] PATTERNS DETECTADOS: {patterns}")
 
-                tables = run_strategies(page, logger)
+                def run_pipeline_for_plan(plano_nome):
+                    items = run_strategies(page, logger)
 
-                for idx, item in enumerate(tables):
+                    for idx, item in enumerate(items):
 
-                    # 🖼️ Power BI Screenshot (PNG)
-                    if isinstance(item, dict) and item.get("__kind__") == "png":
-                        store(
-                            entidade=entidade,
-                            source_page=page.url,
-                            kind="png",
-                            content=item["__bytes__"],
-                            meta={
-                                "filename": item.get("__filename__"),
-                                "strategy": "powerbi_screenshot",
-                                "index": idx
-                            }
-                        )
+                        if isinstance(item, dict) and item.get("__kind__") == "png":
+                            store(
+                                entidade=entidade,
+                                source_page=page.url,
+                                kind="png",
+                                content=item["__bytes__"],
+                                meta={
+                                    "filename": item.get("__filename__"),
+                                    "strategy": "powerbi",
+                                    "plano": plano_nome,
+                                    "index": idx,
+                                },
+                            )
 
-                    # 🔥 Power BI exporta CSV
-                    elif isinstance(item, dict) and "csv_bytes" in item:
-                        store(
-                            entidade=entidade,
-                            source_page=page.url,
-                            kind="csv",
-                            content=item["csv_bytes"],
-                            meta={
-                                "filename": item.get("filename"),
-                                "strategy": "powerbi",
-                                "index": idx
-                            }
-                        )
+                        elif isinstance(item, dict) and "csv_bytes" in item:
+                            store(
+                                entidade=entidade,
+                                source_page=page.url,
+                                kind="csv",
+                                content=item["csv_bytes"],
+                                meta={
+                                    "filename": item.get("filename"),
+                                    "strategy": "powerbi",
+                                    "plano": plano_nome,
+                                    "index": idx,
+                                },
+                            )
 
-                    # 🔹 Fluxo antigo (JSON)
-                    else:
-                        store(
-                            entidade=entidade,
-                            source_page=page.url,
-                            kind="table",
-                            content=item,
-                            meta={
-                                "strategy": "auto_detect",
-                                "index": idx
-                            }
-                        )
+                        elif isinstance(item, dict) and item.get("__kind__") == "url":
+                            downloader(
+                                session=session,
+                                url=item["__url__"],
+                                state=state,
+                                storage=storage,
+                                source_page=page.url,
+                                anchor_text=f"plano:{plano_nome}"
+                                if plano_nome
+                                else "document_library",
+                                detected_year=None,
+                                entidade=entidade,
+                            )
+
+                        else:
+                            store(
+                                entidade=entidade,
+                                source_page=page.url,
+                                kind="table",
+                                content=item,
+                                meta={
+                                    "strategy": "auto_detect",
+                                    "plano": plano_nome,
+                                    "index": idx,
+                                },
+                            )
 
             except Exception as e:
-                logger.debug(f"[{entidade}] Erro ao rodar estratégias: {e}")
-
-            if time.time() - start_time > HARD_PAGE_BUDGET_SEC:
-                continue
+                logger.debug(f"[{entidade}] Erro ao rodar pipeline: {e}")
 
             # =====================================================
-            # EXPANDIR ACCORDIONS
+            # EXPANSÕES E CLIQUES FINAIS (mantido igual)
             # =====================================================
-            page.evaluate("""
-            () => {
-                document.querySelectorAll('button, a, div, span').forEach(el => {
-                    const t = (el.innerText || '').trim();
-                    if (
-                        /^20\\d{2}$/.test(t) ||
-                        t === '+' ||
-                        t === '▸' ||
-                        t.toLowerCase().includes('ver')
-                    ) {
-                        try { el.click(); } catch(e) {}
-                    }
-                });
-            }
-            """)
+            page.evaluate(
+                """
+                () => {
+                    document.querySelectorAll('button, a, div, span').forEach(el => {
+                        const t = (el.innerText || '').trim().toLowerCase();
+                        if (/^20\\d{2}$/.test(t) || t === '+' || t.includes('ver')) {
+                            try { el.click(); } catch(e) {}
+                        }
+                    });
+                }
+                """
+            )
 
-            # =====================================================
-            # 🔥 PATCH CRÍTICO — CLIQUE EM BOTÕES DE DOWNLOAD JS
-            # =====================================================
             try:
                 buttons = page.locator("button:visible, a:visible")
-                for i in range(buttons.count()):
-                    el = buttons.nth(i)
+                for j in range(buttons.count()):
+                    el = buttons.nth(j)
                     text = (el.inner_text() or "").lower()
-
                     if "download" in text or "baixar" in text or "visualizar" in text:
-                        logger.info(
-                            f"[{entidade}] Clique forçado em botão de download JS"
-                        )
                         try:
                             el.click()
                             page.wait_for_timeout(800)
@@ -314,9 +290,6 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
             except Exception:
                 pass
 
-            # =====================================================
-            # PDFs VISÍVEIS NO DOM
-            # =====================================================
             for a in page.locator("a:visible").all():
                 href = a.get_attribute("href")
                 if not href or not href.lower().endswith(".pdf"):
@@ -338,12 +311,9 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     meta={
                         "url": pdf_url,
                         "year": infer_year(pdf_url),
-                        "origin": "dom_visible"
-                    }
+                        "origin": "dom_visible",
+                    },
                 )
 
-        logger.warning(
-            f"[{entidade}] Browser fallback STRONG finalizado"
-        )
-
+        logger.warning(f"[{entidade}] Browser fallback STRONG finalizado")
         browser.close()

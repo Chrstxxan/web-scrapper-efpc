@@ -16,22 +16,41 @@ from downloader.downloader import download
 from storage.index import append_index
 
 
+# ==================================================
+# HELPERS
+# ==================================================
+
+NON_HTML_EXTS = (
+    ".xml", ".pdf", ".zip",
+    ".doc", ".docx",
+    ".xls", ".xlsx",
+)
+
+def is_html_page(url: str) -> bool:
+    return not url.lower().endswith(NON_HTML_EXTS)
+
+
 def filter_pages_for_seed(pages: list[str], seed_url: str) -> list[str]:
     seed_host = urlparse(seed_url).hostname or ""
     return [
         p for p in pages
-        if urlparse(p).hostname and urlparse(p).hostname.endswith(seed_host)
+        if urlparse(p).hostname
+        and urlparse(p).hostname.endswith(seed_host)
     ]
 
 
+# ==================================================
+# SEEDS
+# ==================================================
+
 SEEDS = [
     {
-        "entidade": "PETROS",
-        "seed": "https://www2.petros.com.br/web/guest/demonstrativo-de-investimentos",
-        "allowed_paths": [],
-        "mode": "powerbi"
+        "entidade": "REFER",
+        "seed": "https://www.refer.com.br/numeros/demonstrativo-de-investimentos/",
+        "allowed_paths": []
     },
 ]
+
 
 def main():
     logger = setup_logger(Path("data/logs"))
@@ -47,14 +66,14 @@ def main():
 
         entidade = cfg.get("entidade", "DESCONHECIDA")
         seed_url = cfg["seed"]
-        mode = cfg.get("mode")  # 👈 NOVO
+        mode = cfg.get("mode")
 
         logger.info("=" * 60)
         logger.info(f"Iniciando entidade: {entidade}")
         logger.info(f"Seed: {seed_url}")
 
         # ==================================================
-        # 🚨 POWER BI MODE (FORÇADO VIA SEED)
+        # 🚨 POWER BI MODE (FORÇADO)
         # ==================================================
         if mode == "powerbi":
             logger.warning(
@@ -65,16 +84,15 @@ def main():
             crawl_browser(
                 seed_cfg=cfg,
                 state=state,
-                pages=[seed_url],  # 🎯 UMA página, sem passeio
+                pages=[seed_url],
                 downloader=download,
                 storage=append_index,
                 logger=logger
             )
-
-            continue  # ⛔ não executa mais nada desta seed
+            continue
 
         # ==================================================
-        # 1. HTML FIRST (COMPORTAMENTO ORIGINAL)
+        # 1️⃣ HTML FIRST
         # ==================================================
         stats = crawl(
             session=session,
@@ -86,7 +104,7 @@ def main():
         )
 
         # ==================================================
-        # 1.5 SITEMAP FALLBACK
+        # 1️⃣.5 SITEMAP (APENAS DESCOBERTA)
         # ==================================================
         if should_try_sitemap(stats):
             logger.warning(f"[{entidade}] HTML fraco. Tentando sitemap.")
@@ -99,6 +117,9 @@ def main():
                 seed_base_domain=seed_base,
                 allowed_paths=cfg.get("allowed_paths", [])
             )
+
+            # 🔥 FILTRO CRÍTICO: sitemap só fornece HTML
+            sitemap_urls = [u for u in sitemap_urls if is_html_page(u)]
 
             new_pages = [
                 u for u in sitemap_urls
@@ -125,11 +146,15 @@ def main():
                 logger.info(f"[{entidade}] Sitemap não trouxe páginas úteis.")
 
         # ==================================================
-        # 2. BROWSER FALLBACK LEVE (COMPORTAMENTO ORIGINAL)
+        # 2️⃣ BROWSER FALLBACK (EXECUÇÃO REAL)
         # ==================================================
         if should_escalate(stats):
             all_pages = list(state.visited_pages)
-            pages = filter_pages_for_seed(all_pages, seed_url)
+
+            pages = [
+                p for p in filter_pages_for_seed(all_pages, seed_url)
+                if is_html_page(p)
+            ]
 
             logger.warning(
                 f"[{entidade}] HTML insuficiente "
@@ -138,7 +163,9 @@ def main():
             )
 
             if not pages:
-                logger.warning(f"[{entidade}] Nenhuma página válida para fallback.")
+                logger.warning(
+                    f"[{entidade}] Nenhuma página HTML válida para fallback."
+                )
                 continue
 
             crawl_browser(
