@@ -7,6 +7,7 @@ import re
 import time
 import requests
 from urllib.parse import urljoin
+from requests.exceptions import SSLError
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
@@ -143,7 +144,11 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
                 logger.info(f"[{entidade}] PDF capturado via popup: {pdf_url}")
 
-                r = session.get(pdf_url, timeout=20)
+                try:
+                    r = session.get(pdf_url, timeout=20)
+                except SSLError:
+                    r = session.get(pdf_url, timeout=20, verify=False)
+
                 if r.ok and r.content:
                     store(
                         entidade=entidade,
@@ -178,8 +183,6 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
             logger.info(f"[{entidade}] Browser visitando ({i+1}/{MAX_PAGES}): {url}")
 
-            start_time = time.time()
-
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             except PlaywrightTimeout:
@@ -188,6 +191,50 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
             try:
                 page.wait_for_selector("body", timeout=5000)
             except PlaywrightTimeout:
+                pass
+
+            # =====================================================
+            # 🧭 PATCH — LOAD MORE / VER MAIS
+            # =====================================================
+            try:
+                for _ in range(10):  # limite de segurança
+                    btn = page.locator(
+                        "button:has-text('Ver mais'), "
+                        "a:has-text('Ver mais'), "
+                        "button:has-text('Carregar'), "
+                        "button:has-text('Load')"
+                    )
+
+                    if btn.count() == 0:
+                        break
+
+                    b = btn.first
+                    if not b.is_visible():
+                        break
+
+                    logger.info(f"[{entidade}] Clicando em 'Ver mais'")
+                    b.click()
+                    page.wait_for_timeout(1200)
+            except Exception:
+                pass
+
+            # =====================================================
+            # 🧭 PATCH — ATIVAR TODAS AS TABS VISÍVEIS
+            # =====================================================
+            try:
+                tabs = page.locator("ul.nav-tabs a, .nav-tabs a, [role='tab']")
+                for t in range(tabs.count()):
+                    tab = tabs.nth(t)
+                    try:
+                        if tab.is_visible():
+                            logger.info(
+                                f"[{entidade}] Ativando tab: {(tab.inner_text() or '').strip()}"
+                            )
+                            tab.click()
+                            page.wait_for_timeout(800)
+                    except Exception:
+                        pass
+            except Exception:
                 pass
 
             # =====================================================
@@ -257,38 +304,41 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                                 },
                             )
 
+                run_pipeline_for_plan(plano_nome=None)
+
             except Exception as e:
                 logger.debug(f"[{entidade}] Erro ao rodar pipeline: {e}")
 
             # =====================================================
-            # EXPANSÕES E CLIQUES FINAIS (mantido igual)
+            # EXPANSÕES E CLIQUES FINAIS
             # =====================================================
-            page.evaluate(
-                """
-                () => {
-                    document.querySelectorAll('button, a, div, span').forEach(el => {
-                        const t = (el.innerText || '').trim().toLowerCase();
-                        if (/^20\\d{2}$/.test(t) || t === '+' || t.includes('ver')) {
-                            try { el.click(); } catch(e) {}
-                        }
-                    });
-                }
-                """
-            )
+            if not patterns.has_document_library:
+                page.evaluate(
+                    """
+                    () => {
+                        document.querySelectorAll('button, a, div, span').forEach(el => {
+                            const t = (el.innerText || '').trim().toLowerCase();
+                            if (/^20\\d{2}$/.test(t) || t === '+' || t.includes('ver')) {
+                                try { el.click(); } catch(e) {}
+                            }
+                        });
+                    }
+                    """
+                )
 
-            try:
-                buttons = page.locator("button:visible, a:visible")
-                for j in range(buttons.count()):
-                    el = buttons.nth(j)
-                    text = (el.inner_text() or "").lower()
-                    if "download" in text or "baixar" in text or "visualizar" in text:
-                        try:
-                            el.click()
-                            page.wait_for_timeout(800)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+                try:
+                    buttons = page.locator("button:visible, a:visible")
+                    for j in range(buttons.count()):
+                        el = buttons.nth(j)
+                        text = (el.inner_text() or "").lower()
+                        if "download" in text or "baixar" in text or "visualizar" in text:
+                            try:
+                                el.click()
+                                page.wait_for_timeout(800)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
 
             for a in page.locator("a:visible").all():
                 href = a.get_attribute("href")
@@ -299,7 +349,11 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 if pdf_url in state.visited_files:
                     continue
 
-                r = session.get(pdf_url, timeout=20)
+                try:
+                    r = session.get(pdf_url, timeout=20)
+                except SSLError:
+                    r = session.get(pdf_url, timeout=20, verify=False)
+
                 if not r.ok or not r.content:
                     continue
 

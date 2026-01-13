@@ -22,7 +22,7 @@ def should_try_sitemap(stats: dict) -> bool:
     """
     Decide se vale a pena tentar sitemap
     """
-    if stats["found_pdfs"] > 0:
+    if stats["found_pdfs"] > 0 and not stats["accordion_years"]:
         return False
 
     if stats["visited_pages"] >= 30:

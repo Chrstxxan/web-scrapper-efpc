@@ -45,8 +45,8 @@ def filter_pages_for_seed(pages: list[str], seed_url: str) -> list[str]:
 
 SEEDS = [
     {
-        "entidade": "REFER",
-        "seed": "https://www.refer.com.br/numeros/demonstrativo-de-investimentos/",
+        "entidade": "POSTALIS",
+        "seed": "https://www.postalis.org.br/biblioteca/",
         "allowed_paths": []
     },
 ]

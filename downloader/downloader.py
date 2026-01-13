@@ -5,6 +5,7 @@ import hashlib
 import re
 import time
 import requests
+from requests.exceptions import SSLError
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from datetime import datetime
@@ -17,6 +18,7 @@ def sha256(b: bytes) -> str:
 
 def sanitize(name: str) -> str:
     return re.sub(r"[^a-zA-Z0-9._-]", "_", name).lower()
+
 
 def download(
     session,
@@ -54,7 +56,12 @@ def download(
 
         for attempt in range(3):
             try:
-                r = session.get(url, timeout=40)
+                try:
+                    r = session.get(url, timeout=40)
+                except SSLError:
+                    # 🔥 PATCH: retry automático sem verificação SSL
+                    r = session.get(url, timeout=40, verify=False)
+
                 r.raise_for_status()
                 content = r.content
                 break
