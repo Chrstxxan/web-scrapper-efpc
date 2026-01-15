@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse, unquote
 from datetime import datetime
 from config import FILES_DIR
+from config import MIN_YEAR
 
 
 def sha256(b: bytes) -> str:
@@ -38,6 +39,26 @@ def download(
     if url in state.visited_files:
         return
 
+    # =========================================================
+    # 🔥 FILTRO FINAL DE ANO (REGRA ABSOLUTA)
+    # =========================================================
+    from config import MIN_YEAR
+    import re
+
+    year = detected_year
+
+    # tenta inferir o ano se não veio pronto
+    if year is None:
+        candidates = f"{anchor_text or ''} {url}"
+        matches = re.findall(r"(20\d{2})", candidates)
+        if matches:
+            year = max(int(y) for y in matches)
+
+    # bloqueio duro
+    if year is not None and year < MIN_YEAR:
+        state.save_failed(url)
+        return
+    
     # =========================================================
     # OBTENÇÃO DO CONTEÚDO
     # =========================================================

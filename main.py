@@ -45,8 +45,8 @@ def filter_pages_for_seed(pages: list[str], seed_url: str) -> list[str]:
 
 SEEDS = [
     {
-        "entidade": "POSTALIS",
-        "seed": "https://www.postalis.org.br/biblioteca/",
+        "entidade": "Fundação Itaipu - FIBRA",
+        "seed": "https://www.fundacaoitaipu.com.br/node/2272",
         "allowed_paths": []
     },
 ]
