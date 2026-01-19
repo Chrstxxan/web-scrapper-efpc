@@ -177,6 +177,28 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
         for i, url in enumerate(pages[:MAX_PAGES]):
 
+            # =====================================================
+            # 🚫 PATCH — NÃO NAVEGAR EM URL DE DOWNLOAD
+            # =====================================================
+            low = url.lower()
+            if any(
+                x in low
+                for x in [
+                    ".pdf",
+                    "/arquivo/",
+                    "/download",
+                    "/uploads/",
+                    "file=",
+                ]
+            ):
+                logger.info(
+                    f"[{entidade}] URL é download direto, pulando browser: {url}"
+                )
+                continue
+
+            # =====================================================
+            # 🌐 FILTRO HTML (AGORA SÓ HTML DE VERDADE CHEGA AQUI)
+            # =====================================================
             if not is_html_page(url):
                 logger.info(f"[{entidade}] Ignorando URL não-HTML: {url}")
                 continue
@@ -249,6 +271,9 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
                     for idx, item in enumerate(items):
 
+                        # =====================================================
+                        # 🖼️ PNG (Power BI / screenshots)
+                        # =====================================================
                         if isinstance(item, dict) and item.get("__kind__") == "png":
                             store(
                                 entidade=entidade,
@@ -262,8 +287,12 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                                     "index": idx,
                                 },
                             )
+                            continue
 
-                        elif isinstance(item, dict) and "csv_bytes" in item:
+                        # =====================================================
+                        # 📊 CSV (Power BI)
+                        # =====================================================
+                        if isinstance(item, dict) and "csv_bytes" in item:
                             store(
                                 entidade=entidade,
                                 source_page=page.url,
@@ -276,33 +305,63 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                                     "index": idx,
                                 },
                             )
+                            continue
 
-                        elif isinstance(item, dict) and item.get("__kind__") == "url":
-                            downloader(
-                                session=session,
-                                url=item["__url__"],
-                                state=state,
-                                storage=storage,
-                                source_page=page.url,
-                                anchor_text=f"plano:{plano_nome}"
-                                if plano_nome
-                                else "document_library",
-                                detected_year=None,
-                                entidade=entidade,
+                        # =====================================================
+                        # 🔗 QUALQUER ITEM COM URL → FAIL-OPEN CONTROLADO
+                        # =====================================================
+                        if isinstance(item, dict):
+
+                            link = (
+                                item.get("__url__")
+                                or item.get("url")
+                                or item.get("href")
                             )
 
-                        else:
-                            store(
-                                entidade=entidade,
-                                source_page=page.url,
-                                kind="table",
-                                content=item,
-                                meta={
-                                    "strategy": "auto_detect",
-                                    "plano": plano_nome,
-                                    "index": idx,
-                                },
-                            )
+                            if isinstance(link, str) and link.startswith("http"):
+
+                                # ---------------------------------------------
+                                # 🌐 HTML intermediário → volta para o browser
+                                # ---------------------------------------------
+                                if not link.lower().endswith(".pdf"):
+                                    if link not in state.visited_pages:
+                                        logger.info(
+                                            f"[{entidade}] Enfileirando página intermediária: {link}"
+                                        )
+                                        state.pages.append(link)
+                                    continue
+
+                                # ---------------------------------------------
+                                # 📄 PDF final → downloader
+                                # ---------------------------------------------
+                                downloader(
+                                    session=session,
+                                    url=link,
+                                    state=state,
+                                    storage=storage,
+                                    source_page=page.url,
+                                    anchor_text=f"plano:{plano_nome}"
+                                    if plano_nome
+                                    else "document_library",
+                                    detected_year=infer_year(link),
+                                    entidade=entidade,
+                                )
+                                continue
+
+                        # =====================================================
+                        # 📋 Fallback — tabelas / blobs desconhecidos
+                        # =====================================================
+                        store(
+                            entidade=entidade,
+                            source_page=page.url,
+                            kind="table",
+                            content=item,
+                            meta={
+                                "strategy": "auto_detect",
+                                "plano": plano_nome,
+                                "index": idx,
+                            },
+                        )
 
                 run_pipeline_for_plan(plano_nome=None)
 

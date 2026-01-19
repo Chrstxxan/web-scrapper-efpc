@@ -30,15 +30,31 @@ def run_strategies(page, logger):
     logger.info(f"[PATTERNS][INIT] {patterns}")
 
     # ======================================================
-    # 🔥 POWER BI — PRIORIDADE ABSOLUTA
+    # 🔥 POWER BI — PRIORIDADE CONDICIONAL (ROBUSTA)
     # ======================================================
     if patterns.is_powerbi:
-        logger.info("🚀 Estratégia dominante: Power BI")
+
         try:
-            extracted_items.extend(extract_powerbi_tables(page))
+            # PDFs explícitos OU endpoints de download
+            download_links = page.locator(
+                "a[href$='.pdf'], "
+                "a[href*='.pdf?'], "
+                "a[href*='/Arquivo/'], "
+                "a[onclick*='Arquivo'], "
+                "a[href*='Download']"
+            )
+
+            if download_links.count() > 0:
+                logger.info(
+                    "📄 Links de download detectados — ignorando Power BI nesta página"
+                )
+            else:
+                logger.info("🚀 Estratégia dominante: Power BI")
+                extracted_items.extend(extract_powerbi_tables(page))
+                return extracted_items
+
         except Exception as e:
-            logger.debug(f"[PowerBI] Falha: {e}")
-        return extracted_items
+            logger.debug(f"[PowerBI] Falha ao avaliar prioridade: {e}")
 
     # ======================================================
     # 🧠 FORM STATE MACHINE
@@ -58,9 +74,10 @@ def run_strategies(page, logger):
     try:
         list_links = extract_list_links(page)
         if list_links:
-            logger.info(f"[LIST_LINKS] {len(list_links)} PDFs encontrados")
+            logger.info(f"[LIST_LINKS] {len(list_links)} links encontrados")
             extracted_items.extend(list_links)
-            return extracted_items  # ← estado final
+            # ❗ NÃO RETORNA — deixa o browser pipeline decidir
+
     except Exception as e:
         logger.debug(f"[ListLinks] Falha: {e}")
 
