@@ -6,7 +6,7 @@ import os
 import re
 import time
 import requests
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from requests.exceptions import SSLError
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
@@ -14,6 +14,7 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 from browser.strategy_router import run_strategies
 from storage.writer import store
 from discovery.patterns import detect_patterns
+from config import MIN_YEAR
 
 
 # =========================================================
@@ -50,6 +51,16 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
     entidade = seed_cfg.get("entidade", "DESCONHECIDA")
     session = requests.Session()
+
+    # =====================================================
+    # 🔒 SEED ANCHOR CONFIG (OPT-IN)
+    # =====================================================
+    lock_seed_scope = seed_cfg.get("lock_seed_scope", False)
+    seed_anchor_path = seed_cfg.get("seed_anchor_path")
+
+    if seed_anchor_path:
+        seed_anchor_path = seed_anchor_path.lower().rstrip("/")
+
 
     with sync_playwright() as p:
         logger.warning(f"[{entidade}] Iniciando Playwright (STRONG MODE)")
@@ -178,6 +189,17 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
         for i, url in enumerate(pages[:MAX_PAGES]):
 
             # =====================================================
+            # 🔒 SEED ANCHOR — NÃO VISITAR FORA DO ESCOPO
+            # =====================================================
+            if lock_seed_scope and seed_anchor_path:
+                path = urlparse(url).path.lower().rstrip("/")
+                if not path.startswith(seed_anchor_path):
+                    logger.info(
+                        f"[{entidade}] Browser fora do anchor, ignorando: {url}"
+                    )
+                    continue
+
+            # =====================================================
             # 🚫 PATCH — NÃO NAVEGAR EM URL DE DOWNLOAD
             # =====================================================
             low = url.lower()
@@ -269,6 +291,33 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 def run_pipeline_for_plan(plano_nome):
                     items = run_strategies(page, logger)
 
+                    # =====================================================
+                    # 📚 DOCUMENT LIBRARY — DOWNLOAD DIRETO
+                    # =====================================================
+                    for item in items:
+                        if not isinstance(item, dict):
+                            continue
+
+                        url = item.get("__url__") or item.get("url")
+                        if not isinstance(url, str):
+                            continue
+
+                        if not url.lower().endswith(".pdf"):
+                            continue
+
+                        logger.info(f"[{entidade}] Baixando PDF (document_library): {url}")
+
+                        downloader(
+                            session=session,
+                            url=url,
+                            state=state,
+                            source_page=page.url,
+                            anchor_text="document_library",
+                            detected_year=infer_year(url),
+                            entidade=entidade,
+                        )
+
+
                     for idx, item in enumerate(items):
 
                         # =====================================================
@@ -320,10 +369,19 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
 
                             if isinstance(link, str) and link.startswith("http"):
 
-                                # ---------------------------------------------
-                                # 🌐 HTML intermediário → volta para o browser
-                                # ---------------------------------------------
                                 if not link.lower().endswith(".pdf"):
+
+                                    # =====================================================
+                                    # 🔒 SEED ANCHOR — NÃO REENFILEIRAR FORA DO ESCOPO
+                                    # =====================================================
+                                    if lock_seed_scope and seed_anchor_path:
+                                        path = urlparse(link).path.lower().rstrip("/")
+                                        if not path.startswith(seed_anchor_path):
+                                            logger.info(
+                                                f"[{entidade}] Link fora do anchor ignorado: {link}"
+                                            )
+                                            continue
+
                                     if link not in state.visited_pages:
                                         logger.info(
                                             f"[{entidade}] Enfileirando página intermediária: {link}"
@@ -338,7 +396,6 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                                     session=session,
                                     url=link,
                                     state=state,
-                                    storage=storage,
                                     source_page=page.url,
                                     anchor_text=f"plano:{plano_nome}"
                                     if plano_nome
@@ -399,9 +456,19 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 except Exception:
                     pass
 
-            for a in page.locator("a:visible").all():
-                href = a.get_attribute("href")
-                if not href or not href.lower().endswith(".pdf"):
+            # =====================================================
+            # 🔒 COLETAR HREFS VISÍVEIS (SNAPSHOT SEGURO)
+            # =====================================================
+            try:
+                hrefs = page.eval_on_selector_all(
+                    "a:visible",
+                    "els => els.map(e => e.getAttribute('href')).filter(Boolean)"
+                )
+            except Exception:
+                hrefs = []
+
+            for href in hrefs:
+                if not href.lower().endswith(".pdf"):
                     continue
 
                 pdf_url = urljoin(url, href)
@@ -416,16 +483,21 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 if not r.ok or not r.content:
                     continue
 
-                store(
-                    entidade=entidade,
+                year = infer_year(pdf_url)
+                if year is not None and year < MIN_YEAR:
+                    logger.info(
+                        f"[{entidade}] Ignorado por data ({year} < {MIN_YEAR}): {pdf_url}"
+                    )
+                    continue
+
+                downloader(
+                    session=session,
+                    url=pdf_url,
+                    state=state,
                     source_page=page.url,
-                    kind="pdf",
-                    content=r.content,
-                    meta={
-                        "url": pdf_url,
-                        "year": infer_year(pdf_url),
-                        "origin": "dom_visible",
-                    },
+                    anchor_text="dom_visible",
+                    detected_year=year,
+                    entidade=entidade,
                 )
 
         logger.warning(f"[{entidade}] Browser fallback STRONG finalizado")

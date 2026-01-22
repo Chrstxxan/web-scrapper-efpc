@@ -11,6 +11,7 @@ from urllib.parse import urlparse, unquote
 from datetime import datetime
 from config import FILES_DIR
 from config import MIN_YEAR
+from storage.writer import store
 
 
 def sha256(b: bytes) -> str:
@@ -25,7 +26,6 @@ def download(
     session,
     url,
     state,
-    storage,
     source_page,
     anchor_text,
     detected_year,
@@ -42,9 +42,6 @@ def download(
     # =========================================================
     # 🔥 FILTRO FINAL DE ANO (REGRA ABSOLUTA)
     # =========================================================
-    from config import MIN_YEAR
-    import re
-
     year = detected_year
 
     # tenta inferir o ano se não veio pronto
@@ -72,8 +69,6 @@ def download(
                 "Downloader precisa de uma session válida "
                 "quando não há content_override"
             )
-
-        last_exc = None
 
         for attempt in range(3):
             try:
@@ -138,6 +133,7 @@ def download(
 
     filename = f"{h}__{original}"
     dest = base_dir / filename
+    print(f"[DOWNLOADER] arquivo gravado -> {dest.resolve()}")
     dest.write_bytes(content)
 
     # =========================================================
@@ -146,16 +142,21 @@ def download(
     state.save_hash(h)
     state.save_visited_file(url)
 
-    storage({
-        "file": filename,
+    store(
+    entidade=entidade,
+    source_page=source_page,
+    kind="pdf",
+    content=content,
+    meta={
+        "filename": filename,
         "original_name": original,
         "hash": h,
         "hash_algo": "sha256",
         "url": url,
-        "source_page": source_page,
         "anchor_text": anchor_text,
         "detected_year": detected_year,
         "downloaded_at": datetime.utcnow().isoformat(),
         "size_bytes": len(content),
-        "entidade": entidade,
-    })
+    },
+)
+

@@ -50,7 +50,6 @@ def crawl_browser_interactive(
                     url=url,
                     content_override=content,
                     state=state,
-                    storage=storage,
                     source_page=page.url,
                     anchor_text="browser_interactive",
                     detected_year=None,

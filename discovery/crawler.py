@@ -27,8 +27,10 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
     entidade = seed_cfg.get("entidade", "DESCONHECIDA")
     seed_url = seed_cfg["seed"]
     allowed_paths = seed_cfg.get("allowed_paths", [])
+    lock_seed_scope = seed_cfg.get("lock_seed_scope", False)
 
     seed_base_domain = get_base_domain(seed_url)
+    seed_path = urlparse(seed_url).path.lower().rstrip("/")
 
     # fila com controle de profundidade
     queue = [(seed_url, 0)]
@@ -55,6 +57,13 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
             continue
 
         logger.info(f"[{entidade}] Visitando: {url} (depth={depth})")
+
+        # =========================================================
+        # 🧩 CONTADORES POR PÁGINA
+        # =========================================================
+        valid_pdfs_found = 0
+        ignored_pdfs_found = 0
+
         state.save_visited_page(url)
         stats["visited_pages"] += 1
 
@@ -92,6 +101,32 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
 
             parsed = urlparse(href)
             path_lower = parsed.path.lower()
+            # =====================================================
+            # 🧹 FILTRO DE UI / COOKIES / POLÍTICAS (ANTI-LIXO)
+            # =====================================================
+            LOW_VALUE_HINTS = (
+                "politica",
+                "privacidade",
+                "proteca",
+                "lgpd",
+                "termos",
+                "uso",
+                "cookie",
+            )
+
+            if any(h in path_lower for h in LOW_VALUE_HINTS):
+                logger.debug(
+                    f"[{entidade}] Link de política/cookie ignorado: {href}"
+                )
+                continue
+            
+            # texto do link também denuncia lixo
+            text_lower = text.lower()
+            if any(h in text_lower for h in LOW_VALUE_HINTS):
+                logger.debug(
+                    f"[{entidade}] Texto de link irrelevante ignorado: {text}"
+                )
+                continue
 
             if parsed.fragment:
                 continue
@@ -104,6 +139,16 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
             # HTML nunca sai do domínio
             if not is_document:
                 if is_external_page(href, seed_base_domain):
+                    continue
+
+            # =====================================================
+            # 🔒 SEED SCOPE LOCK (OPT-IN)
+            # =====================================================
+            if lock_seed_scope and not is_document:
+                if seed_path and not path_lower.startswith(seed_path):
+                    logger.debug(
+                        f"[{entidade}] Seed lock ativo, ignorando fora do escopo: {href}"
+                    )
                     continue
 
             # ---------------- DOCUMENTO ----------------
@@ -119,20 +164,22 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
 
                 year = extract_year(f"{text} {href}")
 
-                # ⚠️ só ignora por data se ANO foi detectado
                 if year is not None and year < MIN_YEAR:
                     logger.info(
                         f"[{entidade}] Ignorado por data ({year} < {MIN_YEAR}): {href}"
                     )
+                    ignored_pdfs_found += 1
+                    state.visited_files.add(href)
                     continue
 
                 stats["found_pdfs"] += 1
+                valid_pdfs_found += 1
+                state.visited_files.add(href)
 
                 downloader(
                     session=session,
                     url=href,
                     state=state,
-                    storage=storage,
                     source_page=url,
                     anchor_text=text or "link",
                     detected_year=year,
@@ -143,7 +190,6 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
             else:
                 is_interesting_path = any(h in path_lower for h in PATH_INTEREST_HINTS)
 
-                # 🎯 heurística agora é SOFT (não bloqueante)
                 if (
                     not is_interesting_path
                     and depth >= MAX_CRAWL_DEPTH
@@ -161,9 +207,6 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                         )
                     )
                 ):
-                    logger.debug(
-                        f"[{entidade}] HTML ignorado | depth={depth} | path={path_lower}"
-                    )
                     continue
 
                 if allowed_paths:
@@ -190,6 +233,10 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
             if is_external_page(frame_url, seed_base_domain):
                 continue
 
+            if lock_seed_scope:
+                if seed_path and not path_lower.startswith(seed_path):
+                    continue
+
             is_interesting_path = any(h in path_lower for h in PATH_INTEREST_HINTS)
 
             if (
@@ -206,7 +253,6 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
             if frame_url not in state.visited_pages and all(
                 frame_url != u for u, _ in queue
             ):
-                logger.debug(f"[{entidade}] iframe encontrado: {frame_url}")
                 queue.append((frame_url, depth + 1))
 
         # =========================================================
@@ -239,18 +285,21 @@ def crawl(session, seed_cfg, state, downloader, storage, logger):
                     continue
 
                 stats["found_pdfs"] += 1
-                logger.info(f"[{entidade}] PDF detectado via HTML bruto: {pdf_url}")
+                valid_pdfs_found += 1
+                state.visited_files.add(pdf_url)
 
                 downloader(
                     session=session,
                     url=pdf_url,
                     state=state,
-                    storage=storage,
                     source_page=url,
                     anchor_text="detected_in_html",
                     detected_year=year,
                     entidade=entidade,
                 )
+
+        if valid_pdfs_found == 0 and ignored_pdfs_found > 0:
+            logger.info(f"[{entidade}] Página exaurida (somente PDFs antigos): {url}")
 
         time.sleep(REQUEST_DELAY)
 

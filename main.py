@@ -45,10 +45,12 @@ def filter_pages_for_seed(pages: list[str], seed_url: str) -> list[str]:
 
 SEEDS = [
     {
-        "entidade": "EQT Prev",
-        "seed": "https://eqtprev.com.br/index.php/demonstrativo-d-i/",
-        "allowed_paths": []
-    },
+  "entidade": "CPPREV",
+  "seed": "https://cpprev.com.br/investimentos/d-i-primeiro-semestre-2025/",
+  "lock_seed_scope": True,
+  "seed_anchor_path": "/investimentos"
+}
+
 ]
 
 

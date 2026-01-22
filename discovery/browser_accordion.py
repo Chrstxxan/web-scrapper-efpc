@@ -48,7 +48,6 @@ def crawl_browser_accordion(seed_cfg, state, downloader, storage, logger):
                 session=session,
                 url=pdf_url,
                 state=state,
-                storage=storage,
                 source_page=seed,
                 anchor_text="browser_accordion",
                 detected_year=None,
