@@ -27,7 +27,7 @@ def store(
         out_dir = entidade_dir / "pdfs"
         out_dir.mkdir(exist_ok=True)
 
-        fname = f"{ts}.pdf"
+        fname = meta.get("filename") or f"{ts}.pdf"
         path = out_dir / fname
 
         with open(path, "wb") as f:

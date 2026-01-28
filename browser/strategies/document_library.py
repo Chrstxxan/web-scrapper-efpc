@@ -9,6 +9,25 @@ KEYWORDS = (
     "contábil", "atuarial"
 )
 
+# =====================================================
+# 🎯 FILTRO DURO — INVESTIMENTOS (DI + POLÍTICAS)
+# =====================================================
+REQUIRED_TERMS = (
+    "demonstrativo",
+    "investimento",
+    "investimentos",
+    "d-i",
+    "di_",
+    "di-",
+    "politica",
+    "política",
+)
+
+def is_investment_related(url: str, text: str) -> bool:
+    u = url.lower()
+    t = (text or "").lower()
+
+    return any(term in u or term in t for term in REQUIRED_TERMS)
 
 def extract_document_library(page):
     outputs = []
@@ -33,7 +52,13 @@ def extract_document_library(page):
         # filtro semântico leve (evita menu / lixo)
         if not any(k in text for k in KEYWORDS):
             continue
-
+        
+        # =====================================================
+        # 🎯 FILTRO DURO — INVESTIMENTOS (DI + POLÍTICAS)
+        # =====================================================
+        if not is_investment_related(url, text):
+            continue
+        
         print(f"[DocumentLibrary] candidato detectado: {url}")
         
         outputs.append({

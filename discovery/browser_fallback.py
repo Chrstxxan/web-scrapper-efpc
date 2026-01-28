@@ -4,10 +4,11 @@ modulo que controla o fallback relacionado a utilizacao de browser no scrapping
 
 import os
 import re
-import time
+
 import requests
 from urllib.parse import urljoin, urlparse
 from requests.exceptions import SSLError
+import hashlib
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
@@ -43,6 +44,13 @@ NON_HTML_EXTS = (".xml", ".pdf", ".zip", ".doc", ".docx", ".xls", ".xlsx")
 def is_html_page(url: str) -> bool:
     return not url.lower().endswith(NON_HTML_EXTS)
 
+def normalize_filename(name: str) -> str:
+    name = name.strip()
+    name = re.sub(r"[^\w\-. ]+", "_", name)
+    return name[:200]
+
+def short_hash(data: bytes, size=8) -> str:
+    return hashlib.sha256(data).hexdigest()[:size]
 
 # =========================================================
 # MAIN
@@ -82,10 +90,20 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
         def handle_download(download):
             try:
                 path = download.path()
-                filename = download.suggested_filename
                 content = path.read_bytes()
 
-                logger.info(f"[{entidade}] Download capturado via browser: {filename}")
+                original_name = download.suggested_filename or "arquivo.pdf"
+                original_name = normalize_filename(original_name)
+
+                h = short_hash(content)
+                final_name = f"{h}__{original_name}"
+
+                if download.url:
+                    state.visited_files.add(download.url)
+
+                logger.info(
+                    f"[{entidade}] Download capturado via browser: {final_name}"
+                )
 
                 store(
                     entidade=entidade,
@@ -93,11 +111,13 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     kind="pdf",
                     content=content,
                     meta={
-                        "filename": filename,
-                        "year": infer_year(filename),
+                        "filename": final_name,
+                        "original_filename": original_name,
+                        "year": infer_year(original_name),
                         "origin": "download_event",
                     },
                 )
+
             except Exception as e:
                 logger.error(f"[{entidade}] Erro ao processar download: {e}")
 
@@ -133,6 +153,9 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                         "origin": "xhr",
                     },
                 )
+
+                state.visited_files.add(pdf_url)
+
             except Exception:
                 pass
 
@@ -172,6 +195,8 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                             "origin": "popup",
                         },
                     )
+
+                    state.visited_files.add(pdf_url)
 
                 popup.close()
             except Exception:
@@ -231,34 +256,75 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 page.goto(url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             except PlaywrightTimeout:
                 continue
-
+            
             try:
                 page.wait_for_selector("body", timeout=5000)
             except PlaywrightTimeout:
                 pass
-
+            
             # =====================================================
-            # 🧭 PATCH — LOAD MORE / VER MAIS
+            # 🔓 PATCH A — EXPANDIR TODOS OS ACCORDIONS (ANO / MÊS)
             # =====================================================
             try:
-                for _ in range(10):  # limite de segurança
-                    btn = page.locator(
-                        "button:has-text('Ver mais'), "
-                        "a:has-text('Ver mais'), "
-                        "button:has-text('Carregar'), "
-                        "button:has-text('Load')"
+                accordion_buttons = page.locator(
+                    "button[aria-expanded='false'], "
+                    ".accordion-button.collapsed, "
+                    "[role='button'][aria-expanded='false']"
+                )
+
+                for idx in range(accordion_buttons.count()):
+                    btn = accordion_buttons.nth(idx)
+                    try:
+                        if btn.is_visible():
+                            btn.click()
+                            page.wait_for_timeout(600)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # =====================================================
+            # 🧭 PATCH — LOAD MORE / VER MAIS (SMART)
+            # =====================================================
+            try:
+                # 1️⃣ Se já existem PDFs visíveis, NÃO clicar
+                existing_pdfs = page.locator("a[href*='.pdf' i]")
+                if existing_pdfs.count() > 0:
+                    logger.info(
+                        f"[{entidade}] PDFs já visíveis ({existing_pdfs.count()}), ignorando 'Ver mais'"
                     )
+                else:
+                    for _ in range(5):  # limite de segurança menor
+                        btn = page.locator(
+                            "main button:has-text('Ver mais'), "
+                            "article button:has-text('Ver mais'), "
+                            "section button:has-text('Ver mais')"
+                        )
 
-                    if btn.count() == 0:
-                        break
+                        if btn.count() == 0:
+                            break
 
-                    b = btn.first
-                    if not b.is_visible():
-                        break
+                        b = btn.first
+                        if not b.is_visible():
+                            break
 
-                    logger.info(f"[{entidade}] Clicando em 'Ver mais'")
-                    b.click()
-                    page.wait_for_timeout(1200)
+                        # 2️⃣ Snapshot antes do clique
+                        before = page.locator("a[href*='.pdf' i]").count()
+
+                        logger.info(f"[{entidade}] Clicando em 'Ver mais' contextual")
+                        b.click()
+                        page.wait_for_timeout(1200)
+
+                        # 3️⃣ Snapshot depois
+                        after = page.locator("a[href*='.pdf' i]").count()
+
+                        # 4️⃣ Se não liberou nada novo → para
+                        if after <= before:
+                            logger.info(
+                                f"[{entidade}] 'Ver mais' não liberou novos PDFs, parando"
+                            )
+                            break
+
             except Exception:
                 pass
 
@@ -292,7 +358,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     items = run_strategies(page, logger)
 
                     # =====================================================
-                    # 📚 DOCUMENT LIBRARY — DOWNLOAD DIRETO
+                    # 📚 DOCUMENT LIBRARY — DISPARO VIA BROWSER + FALLBACK
                     # =====================================================
                     for item in items:
                         if not isinstance(item, dict):
@@ -305,7 +371,61 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                         if not url.lower().endswith(".pdf"):
                             continue
 
-                        logger.info(f"[{entidade}] Baixando PDF (document_library): {url}")
+                        logger.info(f"[{entidade}] Disparando download (document_library): {url}")
+
+                        # -------------------------------------------------
+                        # 1️⃣ TENTATIVA PRINCIPAL — browser CONTROLADO
+                        # -------------------------------------------------
+                        try:
+                            with page.expect_download(timeout=20000) as download_info:
+                                page.evaluate("(url) => window.open(url, '_blank')", url)
+
+                            download = download_info.value
+
+                            path = download.path()
+                            content = path.read_bytes()
+
+                            original_name = (
+                                download.suggested_filename
+                                or url.split("/")[-1]
+                                or "arquivo.pdf"
+                            )
+                            original_name = normalize_filename(original_name)
+
+                            h = short_hash(content)
+                            final_name = f"{h}__{original_name}"
+
+                            store(
+                                entidade=entidade,
+                                source_page=page.url,
+                                kind="pdf",
+                                content=content,
+                                meta={
+                                    "filename": final_name,
+                                    "original_filename": original_name,
+                                    "url": url,
+                                    "year": infer_year(original_name) or infer_year(url),
+                                    "origin": "document_library_browser",
+                                },
+                            )
+
+                            state.visited_files.add(url)
+
+                            logger.info(
+                                f"[{entidade}] Download concluído via browser controlado: {final_name}"
+                            )
+
+                            continue
+
+                        except Exception as e:
+                            logger.warning(
+                                f"[{entidade}] Browser download falhou, usando fallback: {e}"
+                            )
+
+                        # -------------------------------------------------
+                        # 2️⃣ FALLBACK — requests/downloader
+                        # -------------------------------------------------
+                        logger.info(f"[{entidade}] Fallback downloader (document_library): {url}")
 
                         downloader(
                             session=session,
@@ -317,6 +437,8 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                             entidade=entidade,
                         )
 
+                        # 🧘‍♂️ throttle leve entre downloads
+                        page.wait_for_timeout(700)
 
                     for idx, item in enumerate(items):
 
@@ -428,7 +550,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
             # =====================================================
             # EXPANSÕES E CLIQUES FINAIS
             # =====================================================
-            if not patterns.has_document_library:
+            if not patterns.has_document_library and patterns.has_popup_links:
                 page.evaluate(
                     """
                     () => {
@@ -468,7 +590,7 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                 hrefs = []
 
             for href in hrefs:
-                if not href.lower().endswith(".pdf"):
+                if ".pdf" not in href.lower():
                     continue
 
                 pdf_url = urljoin(url, href)
@@ -499,6 +621,8 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                     detected_year=year,
                     entidade=entidade,
                 )
+
+                state.visited_files.add(pdf_url)
 
         logger.warning(f"[{entidade}] Browser fallback STRONG finalizado")
         browser.close()
