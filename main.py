@@ -45,10 +45,10 @@ def filter_pages_for_seed(pages: list[str], seed_url: str) -> list[str]:
 
 SEEDS = [
     {
-        "entidade": "AvonPrev",
-        "seed": "https://avonprev.com.br/transparencia/",
+        "entidade": "FUMPRESC",
+        "seed": "https://fumpresc.com.br/demonstrativos-de-investimento/",
         "lock_seed_scope": True,
-        "seed_anchor_path": "/transparencia/"
+        "seed_anchor_path": "/demonstrativos-de-investimento/"
     }
 ]
 
@@ -150,12 +150,38 @@ def main():
         # 2️⃣ BROWSER FALLBACK (EXECUÇÃO REAL)
         # ==================================================
         if should_escalate(stats):
-            all_pages = list(state.visited_pages)
+            # ==================================================
+            # 🎯 PÁGINAS PARA BROWSER FALLBACK (ORDEM IMPORTA)
+            # ==================================================
 
-            pages = [
-                p for p in filter_pages_for_seed(all_pages, seed_url)
-                if is_html_page(p)
+            seed = seed_url
+
+            # 1️⃣ sempre começar pela seed
+            pages = [seed]
+
+            # 2️⃣ páginas HTML visitadas que estejam no mesmo escopo
+            anchor = cfg.get("seed_anchor_path")
+
+            derived_pages = [
+                p for p in state.visited_pages
+                if p != seed
+                and is_html_page(p)
+                and (
+                    not anchor
+                    or urlparse(p).path.startswith(anchor)
+                )
             ]
+
+            # 3️⃣ sitemap / resto entra só depois
+            fallback_pages = [
+                p for p in state.visited_pages
+                if p not in pages
+                and p not in derived_pages
+                and is_html_page(p)
+            ]
+
+            pages.extend(derived_pages)
+            pages.extend(fallback_pages)
 
             logger.warning(
                 f"[{entidade}] HTML insuficiente "

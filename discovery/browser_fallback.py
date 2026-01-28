@@ -211,18 +211,25 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
             f"[{entidade}] Usando browser fallback STRONG ({len(pages)} páginas)"
         )
 
+        seed_base_url = seed_cfg["seed"].rstrip("/")
+
         for i, url in enumerate(pages[:MAX_PAGES]):
 
             # =====================================================
-            # 🔒 SEED ANCHOR — NÃO VISITAR FORA DO ESCOPO
+            # 🔒 SEED ANCHOR — NÃO BLOQUEAR A PRIMEIRA PÁGINA
             # =====================================================
             if lock_seed_scope and seed_anchor_path:
-                path = urlparse(url).path.lower().rstrip("/")
-                if not path.startswith(seed_anchor_path):
-                    logger.info(
-                        f"[{entidade}] Browser fora do anchor, ignorando: {url}"
-                    )
-                    continue
+
+                # ✅ sempre permitir a própria seed
+                if url.rstrip("/") != seed_base_url:
+
+                    path = urlparse(url).path.lower().rstrip("/")
+
+                    if not path.startswith(seed_anchor_path):
+                        logger.info(
+                            f"[{entidade}] Browser fora do anchor, ignorando: {url}"
+                        )
+                        continue
 
             # =====================================================
             # 🚫 PATCH — NÃO NAVEGAR EM URL DE DOWNLOAD
@@ -344,6 +351,33 @@ def crawl_browser(seed_cfg, state, pages, downloader, storage, logger):
                             page.wait_for_timeout(800)
                     except Exception:
                         pass
+            except Exception:
+                pass
+
+            # =====================================================
+            # 🧭 PATCH — MENU LATERAL (SPA / SIDEBAR)
+            # =====================================================
+            try:
+                # só tenta se ainda NÃO existem PDFs visíveis
+                if page.locator("a[href*='.pdf' i]").count() == 0:
+
+                    sidebar_links = page.locator("aside a:visible, nav a:visible")
+
+                    for i in range(sidebar_links.count()):
+                        el = sidebar_links.nth(i)
+                        try:
+                            text = (el.inner_text() or "").strip().lower()
+
+                            if "demonstrativo de investimentos" in text:
+                                logger.warning(
+                                    f"[{entidade}] Ativando menu lateral SPA: {text}"
+                                )
+                                el.click()
+                                page.wait_for_timeout(2000)
+                                break
+
+                        except Exception:
+                            pass
             except Exception:
                 pass
 
